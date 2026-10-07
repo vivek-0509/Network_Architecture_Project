@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>bhttp/1 specification</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      white-space: pre-wrap;
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <style>
+    @page { size: A4; margin: 15mm 16mm; }
+    body { font: 10.4pt/1.32 Georgia, "Times New Roman", serif; max-width: 180mm; margin: 0 auto; color: #111; }
+    h1 { font-size: 17pt; margin: 0 0 4pt; }
+    h2 { font-size: 11.5pt; margin: 11pt 0 3pt; border-bottom: 1px solid #999; }
+    p { margin: 3pt 0; text-align: justify; }
+    pre { font: 8.6pt/1.22 Menlo, Consolas, monospace; background: #f5f5f5; padding: 4pt 6pt; margin: 3pt 0; white-space: pre; }
+    code { font: 8.8pt Menlo, Consolas, monospace; }
+    table { border-collapse: collapse; margin: 3pt 0; font-size: 9.3pt; }
+    th, td { border: 1px solid #bbb; padding: 1.5pt 4pt; vertical-align: top; }
+    th { background: #eee; text-align: left; }
+    ul { margin: 2pt 0; padding-left: 16pt; }
+    li { margin: 1pt 0; }
+    header#title-block-header { display: none; }
+  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">bhttp/1 specification</h1>
+</header>
+<h1 id="bhttp1-http-over-binary-frames">bhttp/1: HTTP over binary
+frames</h1>
+<p><strong>Author:</strong> Vivek Singh Solanki (roll number
+24bcs10338). <strong>Version 1.</strong> Transport: one TCP connection.
+Every multi-byte integer is big-endian (network order). Lengths are in
+bytes. <code>u8</code>/<code>u16</code>/<code>u24</code> are unsigned
+integers of that width. This document is the whole contract between a
+client (<code>bcurl</code>) and a server (<code>bserve</code>); a client
+written only from this page must work against any conforming server.</p>
+<h2 id="connection">1. Connection</h2>
+<p>The client opens a TCP connection and sends the 8-byte
+<strong>preface</strong> <code>62 68 74 74 70 2f 31 0a</code> (ASCII
+<code>bhttp/1\n</code>) before anything else. A server that does not
+receive exactly these 8 bytes first MUST reply with a RESPONSE of status
+400 and close. After the preface, both sides send only
+<strong>frames</strong> (§2), until the client closes the connection.
+The connection carries any number of requests, <strong>one after
+another</strong>: the client sends a complete request, reads the
+complete response, then may send the next. A server MAY close a
+connection that has been idle for 30 s. If the connection closes before
+a response’s last frame, the response is incomplete and the client MUST
+treat it as an error.</p>
+<h2 id="frame-header-8-bytes-fixed">2. Frame header: 8 bytes, fixed</h2>
+<pre><code> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      Length (24)              |   Type (8)    |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|   Flags (8)   |                 Request ID (24)               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                     Payload (Length bytes) ...</code></pre>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Width</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Length</td>
+<td>24 bits</td>
+<td>Payload bytes that follow the header. In version 1, 0 ≤ Length ≤
+<strong>16 384</strong>. A larger value is a framing error (§6).</td>
+</tr>
+<tr>
+<td>Type</td>
+<td>8 bits</td>
+<td><code>0x01</code> REQUEST, <code>0x02</code> RESPONSE,
+<code>0x03</code> DATA. Every other value is <em>unassigned</em> (see
+the rule below).</td>
+</tr>
+<tr>
+<td>Flags</td>
+<td>8 bits</td>
+<td>Bit 0 (<code>0x01</code>) is <strong>END_STREAM</strong>: “this is
+the last frame of this request or response”. Other bits are unassigned:
+senders clear them, receivers ignore them.</td>
+</tr>
+<tr>
+<td>Request ID</td>
+<td>24 bits</td>
+<td>The request this frame belongs to. The client chooses it (start at
+1, add 1 per request) and the server echoes it in every frame of the
+reply. <strong>0 is reserved</strong> for future connection-level frames
+and is never valid for a request.</td>
+</tr>
+</tbody>
+</table>
+<p>The header is two 32-bit words, so in C it is
+<code>w0 = ntohl(..)</code>, <code>len = w0 &gt;&gt; 8</code>,
+<code>type = w0 &amp; 0xff</code>, <code>w1 = ntohl(..)</code>,
+<code>flags = w1 &gt;&gt; 24</code>,
+<code>id = w1 &amp; 0xffffff</code>.</p>
+<p><strong>The rule you may not skip.</strong> A receiver that meets a
+frame whose Type it does not know MUST read exactly Length payload
+bytes, discard them, and continue with the next frame as though nothing
+had arrived. It MUST NOT close the connection, reply with an error, or
+interpret the payload. This is what lets a later version add frame types
+that version-1 peers survive. The Length limit still applies to unknown
+frames.</p>
+<h2 id="frame-types">3. Frame types</h2>
+<p><strong>REQUEST</strong> (<code>0x01</code>), client → server.
+Payload:</p>
+<pre><code>u8   method        0x01 GET  0x02 HEAD  0x03 POST  0x04 PUT  0x05 DELETE  0x06 OPTIONS
+u16  path-length
+[]   path          path-length bytes of UTF-8; MUST begin with &#39;/&#39;; may carry ?query;
+                   percent-encoding is allowed and is decoded by the server
+u8   header-count
+[]   header fields  header-count of them, encoded as in §4</code></pre>
+<p>END_STREAM set means the request has no body. Clear means DATA frames
+with the same Request ID follow, the last of them carrying
+END_STREAM.</p>
+<p><strong>RESPONSE</strong> (<code>0x02</code>), server → client.
+Payload:</p>
+<pre><code>u16  status         the HTTP status code (200, 404, ...)
+u8   header-count
+[]   header fields  as in §4</code></pre>
+<p>END_STREAM set means there is no body (HEAD, 304, an empty file).
+Clear means DATA frames follow.</p>
+<p><strong>DATA</strong> (<code>0x03</code>), either direction. The
+payload is raw body bytes. A body is the concatenation of its DATA
+frames’ payloads in order; each is at most 16 384 bytes and the last
+carries END_STREAM. A zero-length body needs no DATA frame at all: put
+END_STREAM on the REQUEST or RESPONSE instead. <strong>Framing, not
+<code>content-length</code>, ends a body</strong>;
+<code>content-length</code> is advisory and, if present, MUST equal the
+total body size.</p>
+<h2 id="header-fields">4. Header fields</h2>
+<p>A header field is a <em>name</em> and a <em>value</em>. Names are
+1-255 bytes of printable ASCII, lowercase, with no <code>:</code>;
+values are opaque bytes. The first two ideas of HPACK, and only those:
+names that are common are sent as a one-byte index into a fixed table;
+every other name is sent literally with a length prefix; values are
+always literal.</p>
+<pre><code>u8   name-index     1..10: the name is static-table entry n;  0: a literal name follows
+u8   name-length    only present when name-index == 0
+[]   name           only present when name-index == 0
+u16  value-length
+[]   value</code></pre>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+</colgroup>
+<thead>
+<tr>
+<th>#</th>
+<th>name</th>
+<th>#</th>
+<th>name</th>
+<th>#</th>
+<th>name</th>
+<th>#</th>
+<th>name</th>
+<th>#</th>
+<th>name</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>host</code></td>
+<td>2</td>
+<td><code>user-agent</code></td>
+<td>3</td>
+<td><code>accept</code></td>
+<td>4</td>
+<td><code>if-none-match</code></td>
+<td>5</td>
+<td><code>content-type</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>content-length</code></td>
+<td>7</td>
+<td><code>server</code></td>
+<td>8</td>
+<td><code>date</code></td>
+<td>9</td>
+<td><code>last-modified</code></td>
+<td>10</td>
+<td><code>etag</code></td>
+</tr>
+</tbody>
+</table>
+<p>Indexes 11-255 are reserved and MUST NOT be sent in version 1; a
+receiver treats them as malformed (§6), since it cannot know what name
+they stand for. Example: <code>host: localhost</code> is
+<code>01 00 09 6c 6f 63 61 6c 68 6f 73 74</code> (12 bytes, versus 17 as
+text); <code>accept-language: en</code> is <code>00 0f</code> +
+<code>accept-language</code> + <code>00 02 65 6e</code> (21 bytes).</p>
+<h2 id="request-response-and-what-the-server-does">5. Request, response,
+and what the server does</h2>
+<pre><code>C → S   preface  &quot;bhttp/1\n&quot;
+C → S   REQUEST  id=1  END_STREAM     GET /index.html + headers
+S → C   RESPONSE id=1                 200 + headers
+S → C   DATA     id=1  END_STREAM     the file (one or more DATA frames, last has END_STREAM)
+C → S   REQUEST  id=2  ...            connection stays open</code></pre>
+<p><code>bserve ROOT PORT</code> maps the path (minus
+<code>?query</code>, percent-decoded, <code>.</code>/<code>..</code>
+segments resolved) onto a file under ROOT. A directory serves its
+<code>index.html</code>.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Status</th>
+<th>When</th>
+<th>Body</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>file found; GET sends the bytes, HEAD only the headers</td>
+<td>file</td>
+</tr>
+<tr>
+<td>304</td>
+<td>request carried <code>if-none-match</code> equal to the file’s
+<code>etag</code> (or <code>*</code>)</td>
+<td>none</td>
+</tr>
+<tr>
+<td>400</td>
+<td>malformed frame or payload (§6); the body names the problem</td>
+<td>text/plain</td>
+</tr>
+<tr>
+<td>403</td>
+<td>path climbs out of ROOT (also via symlink), or file not
+readable</td>
+<td>text/plain</td>
+</tr>
+<tr>
+<td>404</td>
+<td>nothing at that path</td>
+<td>text/plain</td>
+</tr>
+<tr>
+<td>405</td>
+<td>method defined but not GET/HEAD; response carries
+<code>allow: GET, HEAD</code></td>
+<td>text/plain</td>
+</tr>
+<tr>
+<td>500</td>
+<td>I/O error while serving</td>
+<td>text/plain</td>
+</tr>
+</tbody>
+</table>
+<p>Every 200 carries <code>content-type</code>,
+<code>content-length</code>, <code>server</code>, <code>date</code>,
+<code>last-modified</code> and <code>etag</code>. Servers MAY add
+headers; clients MUST accept names they do not know.</p>
+<h2 id="errors">6. Errors</h2>
+<p>Two kinds, distinguished by whether the receiver can still find the
+next frame boundary.</p>
+<ul>
+<li><strong>Malformed payload</strong> (frame boundaries intact):
+undefined method; path not beginning with <code>/</code> or not UTF-8; a
+length field running past the payload; bytes left over after the header
+block; header index &gt; 10 or an invalid name; Request ID 0; DATA for a
+Request ID with no open request; a defined frame type arriving in the
+wrong direction. The server replies RESPONSE <strong>400</strong> with
+the offending Request ID and <strong>keeps the connection open</strong>;
+the next request works normally.</li>
+<li><strong>Malformed frame</strong> (the byte stream cannot be
+trusted): wrong preface, Length &gt; 16 384, connection closed in the
+middle of a frame. The server replies RESPONSE <strong>400</strong>
+(Request ID of the frame it was parsing, else 0) and
+<strong>closes</strong>.</li>
+</ul>
+<p>A client that receives a frame for a Request ID it did not send, or
+of a type it does not know, skips it (§2).</p>
+<h2 id="why-these-widths-and-what-version-2-may-change">7. Why these
+widths, and what version 2 may change</h2>
+<p><strong>What HTTP/2 chose, 24/8/8/31 (9 bytes), and why.</strong>
+<em>Length 24</em>: one frame must be small enough that a single stream
+cannot hog a multiplexed connection and a receiver can bound its buffer
+before validating anything. 16 bits would cap frames at 64 KiB forever;
+32 bits would license a 4 GiB allocation from a 4-byte header. So 24,
+with a negotiable limit (default 16 KiB) underneath. <em>Type 8</em>:
+256 types, ten used; the smallest addressable unit. <em>Flags 8</em>:
+one byte of per-type booleans (END_STREAM, END_HEADERS, PADDED,
+PRIORITY, ACK). <em>Stream ID 31 + 1 reserved bit</em>: a whole 32-bit
+word; two billion streams split odd/client, even/server; keeping the top
+bit clear also means the ID never looks negative in a signed
+<code>int32</code>. Nine bytes, unaligned: frames are parsed, not
+memory-mapped, so padding to 12 would buy nothing.</p>
+<p><strong>What bhttp/1 chose, 24/8/8/24 (8 bytes), and why.</strong>
+Length, Type and Flags are HTTP/2’s, for HTTP/2’s reasons; the limit is
+fixed at 16 KiB in v1 and a later version can raise it with a new
+SETTINGS-style frame type, which v1 peers skip by the rule in §2. The
+<strong>Request ID is 24 bits, not 31</strong>: v1 has no multiplexing,
+so it needs neither odd/even halves nor billions of IDs, 16 million
+requests per connection is more than any keep-alive connection will see,
+and dropping those 8 bits lands the header on exactly two 32-bit words.
+<strong>ID 0 is reserved</strong> so connection-level frames have a home
+later. There is <strong>no version byte in the header</strong>: “which
+version?” is asked once per connection, so the preface answers it once,
+instead of spending a byte on every frame. <strong>Status is a 16-bit
+integer</strong>, not a 1-byte index: the three-digit codes fit, and
+there is no table to keep in step with HTTP. <strong>Names are indexed,
+values are not</strong>: names repeat on every request, values rarely
+do; HPACK’s remaining mechanisms (dynamic table, Huffman coding) are
+where the next bytes would come from, and they are not worth a page.</p>
+<p><strong>Version 2 may</strong>: add frame types (v1 skips them), add
+flag bits (v1 ignores them), use Request ID 0 for connection-level
+frames, raise the frame limit, extend the static table. It may not
+change the 8-byte header layout without changing the preface, which is
+exactly what the preface is for.</p>
+</body>
+</html>
