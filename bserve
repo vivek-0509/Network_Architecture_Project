@@ -1,0 +1,556 @@
+#!/usr/bin/env python3
+"""
+bserve - a static file server that speaks bhttp/1: HTTP semantics, binary frames.
+Author: Vivek Singh Solanki (roll number 24bcs10338).
+
+    ./bserve ROOT PORT [-v] [--bind ADDR]
+
+ROOT   directory to serve (the document root)
+PORT   TCP port to listen on (0 = pick a free port and print it)
+-v     hexdump every frame received and sent
+--idle close a connection that has been silent this many seconds (default 30)
+
+Standalone: Python 3.8+, standard library only.  The wire format is defined in
+SPEC.md; the section numbers in the comments below refer to it.
+"""
+
+import argparse
+import mimetypes
+import os
+import socket
+import struct
+import sys
+import threading
+import time
+import urllib.parse
+from email.utils import formatdate
+
+# ---------------------------------------------------------------------------
+# Protocol constants                                            (SPEC.md 1-4)
+# ---------------------------------------------------------------------------
+
+PREFACE = b"bhttp/1\n"          # 1  sent once by the client, before any frame
+HEADER_LEN = 8                  # 2  the fixed frame header
+MAX_FRAME_SIZE = 16384          # 2  largest payload a v1 frame may carry
+
+T_REQUEST = 0x01                # 3  frame types
+T_RESPONSE = 0x02
+T_DATA = 0x03
+TYPE_NAME = {T_REQUEST: "REQUEST", T_RESPONSE: "RESPONSE", T_DATA: "DATA"}
+
+F_END_STREAM = 0x01             # 2  the only flag defined in v1
+
+METHODS = {0x01: "GET", 0x02: "HEAD", 0x03: "POST",
+           0x04: "PUT", 0x05: "DELETE", 0x06: "OPTIONS"}
+
+STATIC_TABLE = (                # 4  indexes 1..10; index 0 = literal name follows
+    "host", "user-agent", "accept", "if-none-match", "content-type",
+    "content-length", "server", "date", "last-modified", "etag",
+)
+NAME_TO_INDEX = {name: i + 1 for i, name in enumerate(STATIC_TABLE)}
+
+REASON = {200: "OK", 304: "Not Modified", 400: "Bad Request", 403: "Forbidden",
+          404: "Not Found", 405: "Method Not Allowed",
+          500: "Internal Server Error"}
+
+SERVER_NAME = "bserve/1.0"
+IDLE_TIMEOUT = 30.0             # 1  seconds a connection may sit idle
+
+
+# ---------------------------------------------------------------------------
+# Errors                                                          (SPEC.md 6)
+# ---------------------------------------------------------------------------
+
+class MalformedPayload(Exception):
+    """Frame boundaries are intact but the payload makes no sense.
+    -> RESPONSE 400 for that Request ID; the connection stays open."""
+
+
+class MalformedFrame(Exception):
+    """The byte stream itself can no longer be trusted.
+    -> RESPONSE 400, then close the connection."""
+
+
+# ---------------------------------------------------------------------------
+# Frame codec                                                     (SPEC.md 2)
+# ---------------------------------------------------------------------------
+
+def pack_header(length, ftype, flags, rid):
+    """The 8-byte header is two big-endian 32-bit words:
+         word 0 = Length(24) | Type(8)
+         word 1 = Flags(8)   | Request ID(24)"""
+    return struct.pack("!II", (length << 8) | ftype, (flags << 24) | rid)
+
+
+def pack_frame(ftype, flags, rid, payload=b""):
+    assert len(payload) <= MAX_FRAME_SIZE
+    return pack_header(len(payload), ftype, flags, rid) + payload
+
+
+def unpack_header(hdr):
+    w0, w1 = struct.unpack("!II", hdr)
+    return w0 >> 8, w0 & 0xFF, w1 >> 24, w1 & 0xFFFFFF   # length, type, flags, rid
+
+
+# ---------------------------------------------------------------------------
+# Payload codec                                                 (SPEC.md 3-4)
+# ---------------------------------------------------------------------------
+
+class Reader:
+    """Bounds-checked cursor over one frame payload."""
+
+    def __init__(self, buf):
+        self.buf = buf
+        self.pos = 0
+
+    def take(self, n, what):
+        if self.pos + n > len(self.buf):
+            raise MalformedPayload("%s runs past the end of the payload" % what)
+        chunk = self.buf[self.pos:self.pos + n]
+        self.pos += n
+        return chunk
+
+    def u8(self, what):
+        return self.take(1, what)[0]
+
+    def u16(self, what):
+        return struct.unpack("!H", self.take(2, what))[0]
+
+    def done(self):
+        return self.pos == len(self.buf)
+
+
+def valid_name(name):
+    """Header names are 1-255 bytes of printable ASCII, lowercase, no ':'."""
+    return (0 < len(name) <= 255
+            and all(0x21 <= c <= 0x7E for c in name)
+            and b":" not in name
+            and name == name.lower())
+
+
+def decode_headers(r):
+    """Header block: u8 count, then `count` fields of
+         u8 name-index  [u8 name-length, name]  u16 value-length, value."""
+    count = r.u8("header-count")
+    fields = []
+    for _ in range(count):
+        idx = r.u8("name-index")
+        if idx == 0:
+            name = bytes(r.take(r.u8("name-length"), "header name"))
+            if not valid_name(name):
+                raise MalformedPayload("header name %r is not a lowercase token" % name)
+            name = name.decode("ascii")
+        elif idx <= len(STATIC_TABLE):
+            name = STATIC_TABLE[idx - 1]
+        else:
+            raise MalformedPayload("header name-index %d is outside the static table" % idx)
+        value = bytes(r.take(r.u16("value-length"), "header value"))
+        fields.append((name, value))
+    return fields
+
+
+def decode_request(payload):
+    """REQUEST payload: u8 method, u16 path-length, path, header block."""
+    r = Reader(payload)
+    method = r.u8("method")
+    path = bytes(r.take(r.u16("path-length"), "path"))
+    headers = decode_headers(r)
+    if not r.done():
+        raise MalformedPayload("%d trailing bytes after the header block"
+                               % (len(payload) - r.pos))
+    if method not in METHODS:
+        raise MalformedPayload("method 0x%02x is not defined" % method)
+    try:
+        path = path.decode("utf-8")
+    except UnicodeDecodeError:
+        raise MalformedPayload("path is not valid UTF-8")
+    if not path.startswith("/"):
+        raise MalformedPayload("path does not begin with '/'")
+    return METHODS[method], path, headers
+
+
+def encode_headers(fields):
+    assert len(fields) <= 255
+    out = bytearray([len(fields)])
+    for name, value in fields:
+        idx = NAME_TO_INDEX.get(name, 0)
+        out.append(idx)
+        if idx == 0:                              # literal name, length-prefixed
+            nb = name.encode("ascii")
+            out.append(len(nb))
+            out += nb
+        vb = value.encode("utf-8") if isinstance(value, str) else value
+        out += struct.pack("!H", len(vb)) + vb
+    return bytes(out)
+
+
+def encode_response(status, fields):
+    """RESPONSE payload: u16 status, header block."""
+    return struct.pack("!H", status) + encode_headers(fields)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_log_lock = threading.Lock()
+
+
+def log(msg):
+    with _log_lock:
+        sys.stderr.write(time.strftime("%H:%M:%S ") + msg + "\n")
+        sys.stderr.flush()
+
+
+def hexdump(data, limit=128):
+    lines = []
+    for i in range(0, min(len(data), limit), 16):
+        chunk = data[i:i + 16]
+        hx = " ".join("%02x" % c for c in chunk)
+        asc = "".join(chr(c) if 32 <= c < 127 else "." for c in chunk)
+        lines.append("    %04x  %-47s  |%s|" % (i, hx, asc))
+    if len(data) > limit:
+        lines.append("    ... %d more bytes" % (len(data) - limit))
+    return lines
+
+
+def http_date(ts=None):
+    return formatdate(ts, usegmt=True)
+
+
+def recv_exact(sock, n):
+    """Read exactly n bytes.  Returns fewer only if the peer closed first."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return bytes(buf)
+
+
+def iter_file(f):
+    """Yield a file in payload-sized chunks (SPEC.md 3, DATA)."""
+    while True:
+        chunk = f.read(MAX_FRAME_SIZE)
+        if not chunk:
+            return
+        yield chunk
+
+
+def first_header(fields, name):
+    for n, v in fields:
+        if n == name:
+            return v
+    return None
+
+
+def map_path(root, raw_path):
+    """Map a request path onto a file under ROOT.  Returns (fs_path, status).
+
+    Strips ?query and #fragment, percent-decodes, resolves '.' and '..'
+    lexically, then checks the real path still lies under ROOT (symlinks
+    included).  A directory maps to its index.html."""
+    path = raw_path.split("?", 1)[0].split("#", 1)[0]
+    try:
+        path = urllib.parse.unquote(path, errors="strict")
+    except UnicodeDecodeError:
+        return None, 400
+    if "\x00" in path:
+        return None, 400
+
+    parts = []
+    for seg in path.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if not parts:               # tried to climb above ROOT
+                return None, 403
+            parts.pop()
+        else:
+            parts.append(seg)
+
+    real = os.path.realpath(os.path.join(root, *parts) if parts else root)
+    if real != root and not real.startswith(root + os.sep):
+        return None, 403                # symlink pointing outside ROOT
+    if os.path.isdir(real):
+        real = os.path.join(real, "index.html")
+    if not os.path.isfile(real):
+        return None, 404
+    if not os.access(real, os.R_OK):
+        return None, 403
+    return real, 200
+
+
+# ---------------------------------------------------------------------------
+# One connection                                                (SPEC.md 1, 5-6)
+# ---------------------------------------------------------------------------
+
+class Connection:
+    def __init__(self, sock, peer, root, verbose, idle=IDLE_TIMEOUT):
+        self.sock = sock
+        self.peer = peer
+        self.root = root
+        self.verbose = verbose
+        self.idle = idle
+        self.last_rid = 0           # ID of the most recent frame header we parsed
+
+    # -- logging ------------------------------------------------------------
+
+    def log(self, msg):
+        log("%s %s" % (self.peer, msg))
+
+    def dump(self, arrow, ftype, flags, rid, payload):
+        name = TYPE_NAME.get(ftype, "UNKNOWN(0x%02x)" % ftype)
+        fl = "END_STREAM" if flags & F_END_STREAM else "-"
+        self.log("%s %s len=%d flags=%s id=%d" % (arrow, name, len(payload), fl, rid))
+        with _log_lock:
+            for line in hexdump(pack_header(len(payload), ftype, flags, rid) + payload):
+                sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+
+    # -- frame I/O ----------------------------------------------------------
+
+    def send_frame(self, ftype, flags, rid, payload=b""):
+        if self.verbose:
+            self.dump(">>", ftype, flags, rid, payload)
+        self.sock.sendall(pack_frame(ftype, flags, rid, payload))
+
+    def read_frame(self):
+        """Return (type, flags, rid, payload), or None on a clean close
+        between frames.  Raises MalformedFrame if the stream is broken."""
+        hdr = recv_exact(self.sock, HEADER_LEN)
+        if not hdr:
+            return None
+        if len(hdr) < HEADER_LEN:
+            raise MalformedFrame("connection closed inside a frame header")
+        length, ftype, flags, rid = unpack_header(hdr)
+        self.last_rid = rid
+        if length > MAX_FRAME_SIZE:
+            raise MalformedFrame("frame length %d exceeds the limit of %d"
+                                 % (length, MAX_FRAME_SIZE))
+        payload = recv_exact(self.sock, length)
+        if len(payload) < length:
+            raise MalformedFrame("connection closed inside a frame payload")
+        if self.verbose:
+            self.dump("<<", ftype, flags, rid, payload)
+        return ftype, flags, rid, payload
+
+    # -- responses ----------------------------------------------------------
+
+    def send_response(self, rid, status, fields, chunks=()):
+        """RESPONSE, then zero or more DATA frames.  END_STREAM goes on the
+        last frame sent, whichever one that is.  Returns body bytes sent."""
+        it = iter(chunks)
+        cur = next(it, None)
+        self.send_frame(T_RESPONSE, F_END_STREAM if cur is None else 0, rid,
+                        encode_response(status, fields))
+        sent = 0
+        while cur is not None:
+            nxt = next(it, None)
+            self.send_frame(T_DATA, F_END_STREAM if nxt is None else 0, rid, cur)
+            sent += len(cur)
+            cur = nxt
+        return sent
+
+    def send_error(self, rid, status, detail="", head=False, extra=()):
+        text = "%d %s" % (status, REASON.get(status, ""))
+        if detail:
+            text += ": " + detail
+        body = (text + "\n").encode("utf-8")
+        fields = [("content-type", "text/plain; charset=utf-8"),
+                  ("content-length", str(len(body))),
+                  ("server", SERVER_NAME),
+                  ("date", http_date())] + list(extra)
+        self.send_response(rid, status, fields, () if head else [body])
+
+    # -- request handling -----------------------------------------------------
+
+    def handle_request(self, rid, method, path, headers):
+        head = method == "HEAD"
+        if method not in ("GET", "HEAD"):
+            self.send_error(rid, 405, extra=[("allow", "GET, HEAD")])
+            self.log("#%d %s %s -> 405" % (rid, method, path))
+            return
+
+        fs_path, status = map_path(self.root, path)
+        if status != 200:
+            self.send_error(rid, status, head=head)
+            self.log("#%d %s %s -> %d" % (rid, method, path, status))
+            return
+
+        try:
+            st = os.stat(fs_path)
+            f = open(fs_path, "rb")
+        except PermissionError:
+            status = 403
+        except FileNotFoundError:
+            status = 404
+        except OSError:
+            status = 500
+        if status != 200:
+            self.send_error(rid, status, head=head)
+            self.log("#%d %s %s -> %d" % (rid, method, path, status))
+            return
+
+        with f:
+            etag = '"%x-%x"' % (st.st_mtime_ns, st.st_size)
+            inm = first_header(headers, "if-none-match")
+            if inm is not None:
+                tags = [t.strip() for t in inm.decode("latin-1").split(",")]
+                if etag in tags or "*" in tags:
+                    self.send_response(rid, 304, [("etag", etag),
+                                                  ("server", SERVER_NAME),
+                                                  ("date", http_date())])
+                    self.log("#%d %s %s -> 304" % (rid, method, path))
+                    return
+
+            ctype = mimetypes.guess_type(fs_path)[0] or "application/octet-stream"
+            if ctype.startswith("text/"):
+                ctype += "; charset=utf-8"
+            fields = [("content-type", ctype),
+                      ("content-length", str(st.st_size)),
+                      ("server", SERVER_NAME),
+                      ("date", http_date()),
+                      ("last-modified", http_date(st.st_mtime)),
+                      ("etag", etag)]
+            n = self.send_response(rid, 200, fields, () if head else iter_file(f))
+        self.log("#%d %s %s -> 200 (%d bytes)" % (rid, method, path, n))
+
+    def close_gracefully(self):
+        """Send FIN, then drain whatever the peer still has in flight.
+
+        Closing a socket that has unread input makes the kernel send RST, which
+        can destroy the 400 we just wrote before the peer reads it.  Shutting
+        down our write side first and reading until the peer closes (or 1 s
+        passes) turns that into an orderly close."""
+        self.sock.shutdown(socket.SHUT_WR)
+        self.sock.settimeout(1.0)
+        try:
+            while self.sock.recv(4096):
+                pass
+        except (socket.timeout, OSError):
+            pass
+
+    # -- main loop ----------------------------------------------------------
+
+    def run(self):
+        self.sock.settimeout(self.idle)
+        pending = None      # (rid, method, path, headers) of a REQUEST whose body is still arriving
+        try:
+            if recv_exact(self.sock, len(PREFACE)) != PREFACE:              # SPEC 1
+                raise MalformedFrame("connection did not start with the bhttp/1 preface")
+
+            while True:
+                frame = self.read_frame()
+                if frame is None:                                           # clean close
+                    self.log("closed by client")
+                    break
+                ftype, flags, rid, payload = frame
+
+                if ftype == T_REQUEST:                                      # SPEC 3
+                    pending = None
+                    try:
+                        if rid == 0:
+                            raise MalformedPayload("Request ID 0 is reserved")
+                        method, path, headers = decode_request(payload)
+                    except MalformedPayload as e:
+                        self.send_error(rid, 400, str(e))
+                        self.log("#%d malformed REQUEST -> 400 (%s)" % (rid, e))
+                        continue
+                    if flags & F_END_STREAM:
+                        self.handle_request(rid, method, path, headers)
+                    else:
+                        pending = (rid, method, path, headers)             # body follows
+
+                elif ftype == T_DATA:                                       # SPEC 3
+                    if pending is None or pending[0] != rid:
+                        self.send_error(rid, 400, "DATA frame for Request ID %d, which has no open request" % rid)
+                        self.log("#%d stray DATA -> 400" % rid)
+                        continue
+                    # A static server has no use for request bodies; drain them.
+                    if flags & F_END_STREAM:
+                        rid, method, path, headers = pending
+                        pending = None
+                        self.handle_request(rid, method, path, headers)
+
+                elif ftype == T_RESPONSE:                                   # SPEC 6
+                    self.send_error(rid, 400, "RESPONSE frames only travel server-to-client")
+                    self.log("#%d RESPONSE from client -> 400" % rid)
+
+                else:                                                       # SPEC 2, the rule
+                    self.log("skipped unknown frame type 0x%02x (%d bytes)" % (ftype, len(payload)))
+
+        except MalformedFrame as e:
+            self.log("fatal: %s -> 400, closing" % e)
+            try:
+                self.send_error(self.last_rid, 400, str(e))
+                self.close_gracefully()
+            except OSError:
+                pass
+        except socket.timeout:
+            self.log("idle for %gs, closing" % self.idle)
+        except (ConnectionResetError, BrokenPipeError):
+            self.log("connection reset by peer")
+        except OSError as e:
+            self.log("socket error: %s" % e)
+        finally:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Listener
+# ---------------------------------------------------------------------------
+
+def listen(bind, port):
+    if bind == "" and socket.has_dualstack_ipv6():
+        return socket.create_server(("", port), family=socket.AF_INET6,
+                                    dualstack_ipv6=True, backlog=64)
+    return socket.create_server((bind, port), backlog=64)
+
+
+def peer_name(addr):
+    host = addr[0]
+    if host.startswith("::ffff:"):          # IPv4 client on a dual-stack socket
+        host = host[7:]
+    return "%s:%d" % (host, addr[1])
+
+
+def serve(root, port, bind="", verbose=False, idle=IDLE_TIMEOUT):
+    root = os.path.realpath(root)
+    if not os.path.isdir(root):
+        sys.exit("bserve: %s is not a directory" % root)
+    srv = listen(bind, port)
+    log("bserve: serving %s on port %d (bhttp/1)%s"
+        % (root, srv.getsockname()[1], " [verbose]" if verbose else ""))
+    try:
+        while True:
+            sock, addr = srv.accept()
+            conn = Connection(sock, peer_name(addr), root, verbose, idle)
+            threading.Thread(target=conn.run, daemon=True).start()
+    except KeyboardInterrupt:
+        log("bserve: shutting down")
+    finally:
+        srv.close()
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="bserve",
+                                 description="Static file server speaking bhttp/1.")
+    ap.add_argument("root", help="directory to serve")
+    ap.add_argument("port", type=int, help="TCP port (0 = any free port)")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="hexdump every frame received and sent")
+    ap.add_argument("--bind", default="", metavar="ADDR",
+                    help="address to listen on (default: all interfaces)")
+    ap.add_argument("--idle", type=float, default=IDLE_TIMEOUT, metavar="SECONDS",
+                    help="close a connection idle for this long (default: %g)" % IDLE_TIMEOUT)
+    args = ap.parse_args()
+    serve(args.root, args.port, args.bind, args.verbose, args.idle)
+
+
+if __name__ == "__main__":
+    main()
