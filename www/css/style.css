@@ -1,0 +1,3 @@
+body { font: 16px/1.5 system-ui, sans-serif; max-width: 40em; margin: 3em auto; color: #222; }
+h1   { font-weight: 600; }
+code { background: #f2f2f2; padding: 0 .3em; }

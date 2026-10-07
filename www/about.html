@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>About bhttp/1</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <h1>bhttp/1</h1>
+  <p>This page was served by <code>bserve</code> over bhttp/1, a binary framing
+     of HTTP: an 8-byte fixed header, three frame types, and header names
+     looked up in a ten-entry static table.</p>
+  <p>Every byte of the exchange that fetched <a href="/index.html">/index.html</a>
+     is annotated in <code>HEXDUMP.md</code>; the wire format is in
+     <code>SPEC.md</code>.</p>
+  <p>Other things to fetch: <a href="/docs/">/docs/</a> (a directory, served as
+     its index.html), <a href="/hello.txt">/hello.txt</a>, and
+     <a href="/missing">/missing</a> (a 404).</p>
+</body>
+</html>
