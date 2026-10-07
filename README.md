@@ -1,4 +1,4 @@
-# bserve: Track 1 (the server) of *Now you write the spec*
+# bserve: Track 1 (the server)
 
 **Vivek Singh Solanki (roll number 24bcs10338)**
 
